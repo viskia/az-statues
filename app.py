@@ -429,7 +429,5 @@ def home():
     page = page.replace("__TITLE_OPTIONS__", title_options).replace("__CHAPTER_OPTIONS__", chapter_options)
     return page
 
-print("ur mom") 
-
 if __name__ == "__main__":
-    app.run(debug=True, port=5001)
+    app.run(debug=False)
