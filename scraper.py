@@ -65,7 +65,7 @@ else:
 existing_urls = {s["url"] for s in all_statutes}
 
 # --- Scrape a new title ---
-TITLE_TO_SCRAPE = 28   # change this number each time you scrape a new title
+TITLE_TO_SCRAPE = 8   # change this number each time you scrape a new title
 
 new_sections, skipped = scrape_title(TITLE_TO_SCRAPE, existing_urls)
 all_statutes.extend(new_sections)

@@ -13,10 +13,52 @@ with open("statutes.json") as f:
     statutes = json.load(f)
 
 TITLE_NAMES = {
+    #"3": "Agriculture",
+    "4": "Alcoholic Beverages and Alternative Nicotine Products",
+    #"5": "Amusements and Sports", 
+    #"6": "Banks and Financial Institutions",
+    #"7": "Bonds",
+    #"8": "Child Safety",
+    #"9": "Cities and Towns",
+    #"10": "Corporations and Associations",
+    #"11": "Counties",
+    #"12": "Courts and Civil Proceedings",
     "13": "Criminal Code",
+    #"14": "Trusts, Estates, and Protecting Proceedings"
     "15": "Education",
+    #"16": "Elections and Electors",
+    #"17": "Game and Fish",
+    #"18": "Information Technology",
+    #"19": "Initiative, Referendum and Recall",
+    #"20": "Insurance",
+    #"21": "Juries", 
+    #"22": "Justice and Municipal Courts",
+    #"23": "Labor",
+    #"25": "Marital and Domestic Relations",
+    #"26": "Military Affairs and Emergency Management",
+    #"27": "Minerals, Oil and Gas",
+    "28": "Transportation",
+    #"29": "Partnership", 
+    #"30": "Power",
+    "31": "Prisons and Prisoners",
+    #"32": "Professions and Occupations":
+    #"33": "Property":
+    #"34": "Public Buildings and Improvements",
+    #"35": "Public Finances":
     "36": "Public Health and Safety",
-    "38": "Transportation"
+    #"37": "Public Lands",
+    #"38": "Public Officers and Employees",
+    #"39": "Public Records, Printing, and Notices",
+    #"40": "Public Utilities and Carriers",
+    #"41": "State Government",
+    #"42": "Taxation":
+    #"43": "Taxation of Income",
+    #"44": "Trade and Commerce",
+    #"45": "Waters",
+    #"46": "Welfare",
+    #"47": "Uniform Commerical Code",
+    #"48": "Special Taxing Districts",
+    #"49": "The Environment",
     # add an entry here each time you scrape a new title
 }
 
@@ -142,7 +184,7 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Arizona Revised Statutes Search</title>
+    <title>ARS Made Easy</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,650&family=Source+Sans+3:wght@400;500;600&display=swap" rel="stylesheet">
@@ -334,9 +376,9 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
 <body>
     <div class="wrap">
         <h1>Arizona Revised Statutes</h1>
-        <p class="lede">Search criminal-code statutes by keyword. Headings rank higher than body text, and rarer legal terms carry more weight.</p>
+        <p class="lede">Search the Arizona Revised Statutes (Arizona Law) by keyword. Headings rank higher than body text, and rarer legal terms carry more weight.</p>
         <form>
-            <input type="text" name="q" value="__QUERY__" placeholder="Try assault, theft, or sentencing..." aria-label="Search statutes" autofocus>
+            <input type="text" name="q" value="__QUERY__" placeholder="Try assault, theft, sentencing, etc..." aria-label="Search statutes" autofocus>
             <select name="title" aria-label="Filter by title" onchange="this.form.submit()">
                 <option value="">All titles</option>
                 __TITLE_OPTIONS__

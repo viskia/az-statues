@@ -2,3 +2,8 @@
 __pycache__/
 .venv/
 .vscode/
+
+search.py
+scraper.py
+scrapechapters.py
+summmarize.py
