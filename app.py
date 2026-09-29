@@ -6,11 +6,16 @@ import json
 import re
 import math
 from semantic_search import semantic_search
+from sentence_transformers import CrossEncoder
 
 app = Flask(__name__)
 
 with open("statutes.json") as f:
     statutes = json.load(f)
+
+print("Loading re-ranker model...")
+reranker = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")   
+
 
 TITLE_NAMES = {
     #"3": "Agriculture",
@@ -145,11 +150,11 @@ def highlight(text, query_words):
         escaped_text = re.sub(pattern, r"<mark>\1</mark>", escaped_text, flags=re.IGNORECASE)
     return escaped_text
 
-MIN_SEMANTIC_SCORE = 0.265   # tune this after testing a few queries
+MIN_SEMANTIC_SCORE = 0.24   # tune results
 
-def hybrid_search(query, top_n=10):
+def hybrid_search(query, top_n=200):
     keyword_results = search_statutes(query)
-    semantic_results = semantic_search(query, top_k=30)
+    semantic_results = semantic_search(query, top_k=150)
 
     keyword_scores = {}
     if keyword_results:
@@ -178,6 +183,15 @@ def hybrid_search(query, top_n=10):
 
     combined.sort(key=lambda pair: pair[0], reverse=True)
     return combined[:top_n]
+
+def rerank(query, candidates, top_n=15):   
+    pairs = [(query, f"{r['heading']}. {r['text'][:500]}") for score, r in candidates]
+    rerank_scores = reranker.predict(pairs)
+
+    reranked = list(zip(rerank_scores, [r for score, r in candidates]))
+    reranked.sort(key=lambda pair: pair[0], reverse=True)
+    return reranked[:top_n]
+
 
 PAGE_TEMPLATE = """<!DOCTYPE html>
 <html lang="en">
@@ -217,16 +231,20 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
             max-width: 760px;
             width: 100%;
             margin: 0 auto;
-            padding: 48px 22px 72px;
+            padding: 48px 22px 28vh;
             flex: 1;
             position: relative;
             z-index: 1;
         }
 
         .landscape {
+            position: fixed;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            z-index: 0;
             width: 100%;
             height: min(48vh, 440px);
-            margin-top: -88px;
             pointer-events: none;
             background:
                 linear-gradient(
@@ -430,16 +448,16 @@ def home():
         return page
 
     query_words = query.lower().split()
-    results = hybrid_search(query)
+    candidates = hybrid_search(query, top_n=200)
 
     if selected_title:
-        results = [(score, r) for score, r in results if r.get("title") == selected_title]
+        candidates = [(score, r) for score, r in candidates if r.get("title") == selected_title]
     if selected_chapter:
-        results = [(score, r) for score, r in results if r.get("chapter") == selected_chapter]
+        candidates = [(score, r) for score, r in candidates if r.get("chapter") == selected_chapter]
 
-    count = len(results)
-    top_score = results[0][0] if results else 0
-    WEAK_RESULT_THRESHOLD = 0.2
+    count = len(candidates)
+    top_score = candidates[0][0] if candidates else 0
+    WEAK_RESULT_THRESHOLD = 0.22
 
     if count == 0 or top_score < WEAK_RESULT_THRESHOLD:
         body = f"""
@@ -449,6 +467,8 @@ def home():
         </div>
         """
     else:
+        results = rerank(query, candidates, top_n=25)   # <-- moved in here, only runs when needed
+
         label = "result" if count == 1 else "results"
         body = f'<p class="meta">{count} {label} for "{escape(query)}"</p>'
 
@@ -472,6 +492,9 @@ def home():
     page = PAGE_TEMPLATE.replace("__QUERY__", str(escape(query))).replace("__BODY__", body)
     page = page.replace("__TITLE_OPTIONS__", title_options).replace("__CHAPTER_OPTIONS__", chapter_options)
     return page
+
+#if __name__ == "__main__":
+    #app.run(debug=True, port=5001)
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
