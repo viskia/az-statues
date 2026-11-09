@@ -7,3 +7,7 @@ search.py
 scraper.py
 scrapechapters.py
 summmarize.py
+devlognov7.md
+.DS_Store
+cached_chunks.json
+cached_vectors.npy

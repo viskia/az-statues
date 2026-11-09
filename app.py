@@ -7,15 +7,22 @@ import re
 import math
 from semantic_search import semantic_search
 from sentence_transformers import CrossEncoder
+# A note on how CrossEncoder works because I don't know what I'm doing:
+# it reads the search query and a piece of the statute text together, comparing each word, and outputs a relevance score. 
+# More accurate than most other steps, but it is slower because it scores each query-document pair individually & nothing can be precomputed.
+# this is the standard design for search systems:
+# 1. RETRIEVE candidate documents using a fast method (semantic search/sentence transformer)
+# 2. RE-RANK the candidates using a more accurate model (cross-encoder)
 
 app = Flask(__name__)
 
 with open("statutes.json") as f:
     statutes = json.load(f)
 
+statutes_by_section = {s["section"]: s for s in statutes} # dictionary comprehension; builds dict mapping each section # to its statute
+
 print("Loading re-ranker model...")
 reranker = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")   
-
 
 TITLE_NAMES = {
     #"3": "Agriculture",
@@ -74,7 +81,6 @@ def get_all_titles(statutes):
             titles.add(statute["title"])
     return sorted(titles, key=lambda t: int(t))
 
-
 def get_chapters_for_title(statutes, title_num):
     chapters = set()
     for statute in statutes:
@@ -82,8 +88,8 @@ def get_chapters_for_title(statutes, title_num):
             chapters.add(statute["chapter"])
     return sorted(chapters)
 
-def build_document_frequency(statutes):
-    # Count how many statutes each word appears in at least once
+def build_document_frequency(statutes): # runs at startup, for every word counts how many statutes contain it at least once (document frequency)
+    #ex. "the" might be in 5900 statutes and "shoplifting" might be in 2. it stores the result in a dictionary (doc_freq)
     doc_freq = {}
     for statute in statutes:
         text = (statute["heading"] + " " + statute["text"]).lower()
@@ -94,17 +100,18 @@ def build_document_frequency(statutes):
 
 doc_freq = build_document_frequency(statutes)   # compute this once, when the app starts
 
-def word_weight(word):
+def word_weight(word): #turns that docfreq into an important score/weight using inverse document frequency (IDF)
     freq = doc_freq.get(word, 1)
     return math.log(len(statutes) / freq)   # rarer words get a bigger number
 
 def count_word_occurrences(word, text):
-    # \b means "word boundary" -- so \bcat\b matches "cat" but not "category"
-    pattern = r"\b" + re.escape(word) + r"\b"
+    """counts how many times a word appears in a piece of text using a regex"""
+    pattern = r"\b" + re.escape(word) + r"\b" # \b means "word boundary" -- so \bcat\b matches "cat" but not "category"
     matches = re.findall(pattern, text)
     return len(matches)
 
-def score_statute(statute, query_words):
+def score_statute(statute, query_words): 
+    """scores a statute based on how many query words it contains, weighting heading matches more than body matches"""
     heading_lower = statute["heading"].lower()
     text_lower = statute["text"].lower()
 
@@ -119,13 +126,15 @@ def score_statute(statute, query_words):
 
     return score
 
-STOPWORDS = {"of", "the", "a", "an", "in", "on", "and", "or", "to", "for", "is", "are"}
-def search_statutes(query):
+STOPWORDS = {"of", "the", "a", "an", "in", "on", "and", "or", "to", "for", "is", "are"} # common words that don't add to search results
+
+def search_statutes(query, pool):
+    """splits the query into words, removes stopwords, scores every statute in the pool, keeps the ones scoring above 0, and sorts them best first."""
     query_words = query.lower().split()
     query_words = [w for w in query_words if w not in STOPWORDS]
     results = []
 
-    for statute in statutes:
+    for statute in pool:  # was: for statutes in statutes
         score = score_statute(statute, query_words)
         if score > 0:
             results.append((score, statute))
@@ -133,7 +142,7 @@ def search_statutes(query):
     results.sort(key=lambda pair: pair[0], reverse=True)
     return results
 
-def get_snippet(statute, query_words):
+def get_snippet(statute, query_words): # get a snippet of the statute text around the first query word found, to show where keywords were found in the text
     text_lower = statute["text"].lower()
     for word in query_words:
         position = text_lower.find(word)
@@ -151,47 +160,66 @@ def highlight(text, query_words):
     return escaped_text
 
 MIN_SEMANTIC_SCORE = 0.24   # tune results
+RRF_K = 60 # standard RRF damping constant. note: RRF means Reciprocal Rank Fusion
+RRF_LIST_DEPTH = 150 # maximum number of results to consider from each list for RRF
 
-def hybrid_search(query, top_n=200):
-    keyword_results = search_statutes(query)
-    semantic_results = semantic_search(query, top_k=150)
+# re-ranker/crossencoder scores: positive = probably relevant, very negative = probably slop
+# the scores aren't on a fixed scale, so a good match for one query can score differently than a good match for another,
+# so these values are intentionally loose and are just rough guidelines chosen by testing 10 real and slop queries.
+RERANK_NO_MATCH = -2.0 # if even the BEST result scores below this, treat the search as "no strong matches"
+RERANK_MIN_SCORE = -5.0 # only keep results above this score, everything below is noise
 
-    keyword_scores = {}
-    if keyword_results:
-        max_kw = max(score for score, r in keyword_results)
-        if max_kw > 0:
-            for score, r in keyword_results:
-                keyword_scores[r["section"]] = score / max_kw
+def hybrid_search(query, top_n=200, title=None, chapter=None):
+    pool = statutes
+    if title:
+        pool = [s for s in pool if s.get("title") == title]
+    if chapter:
+        pool = [s for s in pool if s.get("chapter") == chapter]
+    allowed = {s["section"] for s in pool} if (title or chapter) else None
 
-    semantic_scores = {}
-    for r in semantic_results:
+    keyword_results = search_statutes(query, pool)
+    semantic_results = semantic_search(query, top_k=150, allowed_sections=allowed)
+
+    # major update in how semantic & keyword results are combined, switched to RRF to prevent keyword outliers from dominating and ensure both have the same influence. Before I just averaged the two scores.
+
+    fused_scores = {}
+    # keyword results, each statute gets 1/(k + rank) points
+    for rank, (score, statute) in enumerate(keyword_results[:RRF_LIST_DEPTH], start=1): # tuple unpacking; each keyword is a pair (score, statute) split into 2 variables, score isnt used
+        section = statute["section"]       # keyword_results[:RRF_LIST_DEPTH] gives both lists equal weight, 150 votes each
+        fused_scores[section] = fused_scores.get(section, 0) + 1 / (RRF_K + rank)
+
+    # semantic results, each statute gets 1/(k + rank) points, adds to the keyword points
+    best_snippets = {} # section number -> best semantic snippet
+    for rank, r in enumerate(semantic_results, start=1):
         if r["score"] < MIN_SEMANTIC_SCORE:
-            continue   # too weak to trust, skip it entirely
-        current = semantic_scores.get(r["section"], 0)
-        semantic_scores[r["section"]] = max(current, r["score"])
+            break # the list is already sorted by score so everything after this is too weak, stops at the first score that fails conditional
+        section = r["section"]
+        fused_scores[section] = fused_scores.get(section, 0) + 1 / (RRF_K + rank)
+        best_snippets[section] = r["snippet"]
+        # semantic_search returns one result per section
+        # and it's that section's best paragraph so dont need to compare
 
-    all_sections = set(keyword_scores.keys()) | set(semantic_scores.keys())
-
-    combined = []
-    for section in all_sections:
-        kw = keyword_scores.get(section, 0)
-        sem = semantic_scores.get(section, 0)
-        combined_score = (0.5 * kw) + (0.5 * sem)
-        statute = next((s for s in statutes if s["section"] == section), None)
-        if statute:
-            combined.append((combined_score, statute))
-
+    combined = [(score, statutes_by_section[section]) for section, score in fused_scores.items()]
     combined.sort(key=lambda pair: pair[0], reverse=True)
-    return combined[:top_n]
+    # Return the ranked statutes and the best paragraph for each one, snippets travel in
+    # their own dict instead of being written onto the statute dicts,
+    # b/c 'statutes' is shared by every search, changing it would affect other searches
+    return combined[:top_n], best_snippets # returns both values as a pair, & the caller can split them into two variables
 
-def rerank(query, candidates, top_n=15):   
-    pairs = [(query, f"{r['heading']}. {r['text'][:500]}") for score, r in candidates]
+def rerank(query, candidates, best_snippets, top_n=15):   
+    pairs = []
+    for score, r in candidates:
+        # use the best-matching paragraph; keyword-only results have no snippet, so fall back to heading + start of text
+        text = best_snippets.get(r["section"], f"{r['heading']}. {r['text'][:500]}")
+        pairs.append((query, text))
+
     rerank_scores = reranker.predict(pairs)
-
     reranked = list(zip(rerank_scores, [r for score, r in candidates]))
-    reranked.sort(key=lambda pair: pair[0], reverse=True)
+    # zip() pairs up two lists item by item: (score1, statute1), (score2, statute2), ...
+    reranked.sort(key=lambda pair: pair[0], reverse=True) # highest relevance first
     return reranked[:top_n]
 
+#------------- FRONT END (html/css) -------------
 
 PAGE_TEMPLATE = """<!DOCTYPE html>
 <html lang="en">
@@ -414,6 +442,7 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
 </html>
 """
 
+#------------- BACK END (Flask routes) -------------
 
 @app.route("/")
 def home():
@@ -429,6 +458,7 @@ def home():
         title_options += f'<option value="{escape(t)}" {selected}>{escape(display)}</option>'
 
     # Build chapter dropdown, scoped to the selected title (empty if no title chosen)
+        # Note: learn how to custom-design dropdown menus to match website's design using CSS or JavaScript, default IOS dropdowns are ugly and difficult to read
     chapter_options = ""
     if selected_title:
         for ch in get_chapters_for_title(statutes, selected_title):
@@ -443,23 +473,21 @@ def home():
             Results open the official statute on azleg.gov.
         </div>
         """
+        #rewrite all of the text above to sound less stupid 
         page = PAGE_TEMPLATE.replace("__QUERY__", str(escape(query))).replace("__BODY__", body)
         page = page.replace("__TITLE_OPTIONS__", title_options).replace("__CHAPTER_OPTIONS__", chapter_options)
         return page
 
     query_words = query.lower().split()
-    candidates = hybrid_search(query, top_n=200)
+    candidates, best_snippets = hybrid_search(query, top_n=200, 
+                               title=selected_title or None, 
+                               chapter=selected_chapter or None)
 
-    if selected_title:
-        candidates = [(score, r) for score, r in candidates if r.get("title") == selected_title]
-    if selected_chapter:
-        candidates = [(score, r) for score, r in candidates if r.get("chapter") == selected_chapter]
-
-    count = len(candidates)
-    top_score = candidates[0][0] if candidates else 0
-    WEAK_RESULT_THRESHOLD = 0.22
-
-    if count == 0 or top_score < WEAK_RESULT_THRESHOLD:
+    results = []
+    if candidates:
+        results = rerank(query, candidates, best_snippets, top_n=25)
+        results = [(score, r) for score, r in results if score >= RERANK_MIN_SCORE]
+    if not results or results[0][0] < RERANK_NO_MATCH:
         body = f"""
         <div class="empty">
             <strong>No strong matches for "{escape(query)}".</strong>
@@ -467,8 +495,7 @@ def home():
         </div>
         """
     else:
-        results = rerank(query, candidates, top_n=25)   # <-- moved in here, only runs when needed
-
+        count = len(results) # number of results shown, not 200 candidates
         label = "result" if count == 1 else "results"
         body = f'<p class="meta">{count} {label} for "{escape(query)}"</p>'
 
@@ -493,9 +520,28 @@ def home():
     page = page.replace("__TITLE_OPTIONS__", title_options).replace("__CHAPTER_OPTIONS__", chapter_options)
     return page
 
-#if __name__ == "__main__":
-    #app.run(debug=True, port=5001)
-
+# use to run locally
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 8080))
-    app.run(host="0.0.0.0", port=port)
+    app.run(debug=True, port=5001)
+
+#use to run on google cloudrun
+#if __name__ == "__main__":
+    #port = int(os.environ.get("PORT", 8080))
+    #app.run(host="0.0.0.0", port=port)
+
+# TO DO:
+    # finish scraping titles, chapters
+    # improve search ranking and relevance
+    # add more comprehensive filtering options
+    # enhance UI for better user experience
+    # implement caching for frequently accessed queries
+    # finish summarizing statutes, lowkey maybe restart and use a different model that doesn't immediately run out of credits
+    # maybe add a dropdown under each statute that has additional information past the ai summary, such as:
+        # related statutes
+        # historical context
+        # who the statute applies to
+        # what conduct the statute addresses
+        # penalties/legal consequences 
+        # exceptions or defenses under the statute
+        # any other information that may be important or relevant. 
+    # add pages at the bottom of the search results. Right now, there's a limit on how many results can be on one page, but there's no way to access the other pages. 
