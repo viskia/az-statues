@@ -5,6 +5,7 @@ from markupsafe import escape
 import json
 import re
 import math
+from collections import Counter # # a dictionary made for counting things, e.g. how many times each word appears
 from semantic_search import semantic_search
 from sentence_transformers import CrossEncoder
 # A note on how CrossEncoder works because I don't know what I'm doing:
@@ -88,54 +89,71 @@ def get_chapters_for_title(statutes, title_num):
             chapters.add(statute["chapter"])
     return sorted(chapters)
 
-def build_document_frequency(statutes): # runs at startup, for every word counts how many statutes contain it at least once (document frequency)
-    #ex. "the" might be in 5900 statutes and "shoplifting" might be in 2. it stores the result in a dictionary (doc_freq)
-    doc_freq = {}
+# ---------------- KEYWORD SEARCH (BM25) ----------------
+
+# common words that don't add to search results
+STOPWORDS = {"of", "the", "a", "an", "in", "on", "and", "or", "to", "for", "is", "are", "i", "my", "me", "you", "your", 
+             "what", "how", "do", "does", "can", "if", "with", "by", "at", "as", "be", "that", "this", "from"} 
+
+HEADING_WEIGHT = 3 # weight heading matches more than body matches, just pretend the heading appears 3 times
+BM25_K1 = 1.5        # how fast repeated words stop adding score (standard default)
+BM25_B = 0.75        # how much long statutes get penalized: 0 = not at all, 1 = fully (standard default)
+
+def tokenize(text):
+    """Split text into lowercase words, dropping punctuation and stopwords.
+    e.g. "Theft? Of a motor-vehicle" -> ["theft", "motor", "vehicle"]"""
+    words = re.findall(r"[a-z0-9]+", text.lower())
+    return [w for w in words if w not in STOPWORDS]
+
+def build_bm25_index(statutes):
+    """Runs ONCE at startup. Counts every word in every statute so searches only have to look numbers up.
+    Returns:
+      index      - section number -> (word counts for that statute, total words in it)
+      doc_freq   - word -> how many statutes contain it
+      avg_length - average statute length in words (needed for length normalization)"""
+    index = {}
+    doc_freq = Counter()
+    total_length = 0
+
     for statute in statutes:
-        text = (statute["heading"] + " " + statute["text"]).lower()
-        words_in_this_statute = set(re.findall(r"\b\w+\b", text))
-        for word in words_in_this_statute:
-            doc_freq[word] = doc_freq.get(word, 0) + 1
-    return doc_freq
+        tokens = tokenize(statute["text"]) + tokenize(statute["heading"]) * HEADING_WEIGHT
+        term_counts = Counter(tokens) # word -> how many times it appears in this statute
+        index[statute["section"]] = (term_counts, len(tokens)) # store the counts and the length together as a tuple
+        doc_freq.update(term_counts.keys()) # term_counts.keys() is the list of diff words in the statute, w/ each word appearing at least once 
+        # updates docfreq w/ it, adding 1 to each word's count, meaning "one more statute contains this word"
+        total_length += len(tokens)
 
-doc_freq = build_document_frequency(statutes)   # compute this once, when the app starts
+    avg_length = total_length / len(statutes)
+    return index, doc_freq, avg_length
 
-def word_weight(word): #turns that docfreq into an important score/weight using inverse document frequency (IDF)
-    freq = doc_freq.get(word, 1)
-    return math.log(len(statutes) / freq)   # rarer words get a bigger number
+bm25_index, doc_freq, avg_length = build_bm25_index(statutes)
 
-def count_word_occurrences(word, text):
-    """counts how many times a word appears in a piece of text using a regex"""
-    pattern = r"\b" + re.escape(word) + r"\b" # \b means "word boundary" -- so \bcat\b matches "cat" but not "category"
-    matches = re.findall(pattern, text)
-    return len(matches)
+def idf(word):
+    """Inverse document frequency: rare words are weighted more than common words."""
+    df = doc_freq.get(word, 0) # of statutes containing word
+    return math.log(1 + (len(statutes) - df + 0.5) / (df + 0.5))
 
-def score_statute(statute, query_words): 
-    """scores a statute based on how many query words it contains, weighting heading matches more than body matches"""
-    heading_lower = statute["heading"].lower()
-    text_lower = statute["text"].lower()
+def bm25_score(statute, query_words):
+    """bm25 relevance score of one statute for a list of query words, higher = better match"""
+    term_counts, length = bm25_index[statute["section"]] # look up the precomputed term counts and length/unpacks the tuple stored at startup
 
+    length_norm = 1 - BM25_B + BM25_B * length / avg_length # how long the statute is relative to the average length
     score = 0
     for word in query_words:
-        weight = word_weight(word)
-        heading_hits = count_word_occurrences(word, heading_lower)
-        body_hits = count_word_occurrences(word, text_lower)
-
-        score += heading_hits * 10 * weight   # heading matches count much more
-        score += body_hits * 1 * weight      # body matches count normally
-
+        tf = term_counts.get(word, 0) # term frequency, how many times the word appears in the statute
+        if tf == 0:
+            continue
+        tf_part = (tf * (BM25_K1 + 1)) / (tf + BM25_K1 * length_norm) # diminishing returns and length penalty
+        score += idf(word) * tf_part
     return score
 
-STOPWORDS = {"of", "the", "a", "an", "in", "on", "and", "or", "to", "for", "is", "are"} # common words that don't add to search results
 
 def search_statutes(query, pool):
-    """splits the query into words, removes stopwords, scores every statute in the pool, keeps the ones scoring above 0, and sorts them best first."""
-    query_words = query.lower().split()
-    query_words = [w for w in query_words if w not in STOPWORDS]
+    """Keyword search: score every statute in `pool` with BM25. Returns (score, statute) pairs, best first."""
+    query_words = tokenize(query)
     results = []
-
-    for statute in pool:  # was: for statutes in statutes
-        score = score_statute(statute, query_words)
+    for statute in pool:
+        score = bm25_score(statute, query_words)
         if score > 0:
             results.append((score, statute))
 
